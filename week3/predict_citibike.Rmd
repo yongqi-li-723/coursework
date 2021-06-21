@@ -1,0 +1,172 @@
+---
+title: "predict_citibike"
+output: html_document
+author: "Rajiv Basnet"
+---
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(modelr)
+library(scales)
+library(here)
+library(lubridate)
+```
+
+```{r}
+
+#read and combine data
+
+trips <- read_tsv("trips_per_day.tsv")
+
+holidays <- read_csv("holidays.csv", col_names = c("holiday_row_num", "ymd", "holiday_name"))
+
+#add is_holiday and is_weekend field
+trips_per_day <- trips %>%
+  left_join(holidays, by = "ymd")%>%
+  mutate(is_holiday = (!is.na(holiday_name))) %>%
+  mutate(is_weekend = wday(ymd) == 1 | wday(ymd) == 7)
+  
+head(trips_per_day)
+```
+
+```{r}
+#split into train, test and validate
+set.seed(42)
+spec = c(train = .8, test = .1, validate = .1)
+
+g = sample(cut(
+  seq(nrow(trips_per_day)), 
+  nrow(trips_per_day)*cumsum(c(0,spec)),
+  labels = names(spec)
+))
+
+trips = split(trips_per_day, g)
+
+trips_train_data <-trips$train
+trips_test_data <-trips$test
+trips_validate_data <- trips$validate
+
+```
+
+
+```{r}
+#check relationship of variables with num_trips
+trips_per_day %>% 
+  ggplot(aes(x = prcp + 0.01))+
+  geom_histogram(bins = 10) +
+  scale_x_log10()
+
+                      
+trips_per_day %>% ggplot() + geom_point(aes(x= is_weekend, y = num_trips))
+trips_per_day %>% ggplot() + geom_point(aes(x= snow, y = num_trips))
+trips_per_day %>% ggplot() + geom_point(aes(x= tmax, y = num_trips))
+trips_per_day %>% ggplot() + geom_point(aes(x= tmin, y = num_trips))
+trips_per_day %>% ggplot() + geom_point(aes(x= prcp, y = num_trips))
+
+```
+
+```{r}
+
+#checking a bunch of models and effect of variables
+
+model1 <- lm(num_trips ~ poly(tmin, 3, raw = TRUE) + is_weekend + is_holiday, trips_train_data)
+summary(model1)
+
+model2 <- lm(num_trips ~ poly(tmin, 3, raw = TRUE) + is_weekend + is_holiday, trips_train_data)
+summary(model2)
+
+model3 <- lm(num_trips ~ poly(tmin, 3, raw = TRUE) + is_weekend + is_holiday + tmax, trips_train_data)
+summary(model3)
+
+model4 <- lm(num_trips ~ poly(tmin, 3, raw = TRUE) + tmax*prcp + prcp*is_weekend + is_holiday + snow, data=trips_train_data)
+summary(model4)
+
+#RMSE and RSQ for model4 with validate data
+
+rmse_v <- sqrt(mean((predict(model4, trips_validate_data) - trips_validate_data$num_trips)^2))
+rsq_v <- rsquare(model4, trips_validate_data)
+
+rmse_v
+rsq_v
+
+```
+
+
+```{r}
+trips_train_data %>% 
+  filter(ymd != "2014-04-30") %>%
+  add_predictions(model4) %>%
+  ggplot() +
+  geom_point(aes(x= ymd, y = num_trips)) + 
+  geom_line(aes(x= ymd, y = pred), color = "red") +
+  scale_y_continuous(label = comma) +
+  labs(x = "Date", y = "Number of Trips")
+```
+```{r}
+trips_train_data %>%
+   filter(ymd != "2014-04-30") %>%
+  add_predictions(model4) %>%
+  ggplot() + 
+  geom_point(aes(x= pred, y = num_trips), color = "red") +
+  scale_y_continuous(label = comma) +
+  scale_x_continuous(label = comma) + 
+  labs(x = "Predicted Number of Trips", y = "Actual Number of Trips")
+```
+
+```{r}
+trips_train_data <- trips_train_data %>%
+  add_predictions(model4) %>% 
+  mutate(data_type = "train")
+trips_test_data <- trips_test_data %>% 
+  add_predictions(model4) %>%
+  mutate(data_type = "test")
+trips_validate_data <- trips_validate_data %>%
+  add_predictions(model4) %>%
+  mutate(data_type = "validate")
+
+all_predictions <- bind_rows(trips_test_data, trips_train_data, trips_validate_data)
+
+all_predictions %>% ggplot(aes(x = ymd, y = num_trips, color = data_type)) +
+  geom_point() +
+  geom_smooth(aes(x = ymd, y = pred))
+
+```
+
+
+
+```{r}
+#saving the best model so far
+
+model4 <- lm(num_trips ~ poly(tmin, 3, raw = TRUE) + tmax*prcp + prcp*is_weekend + is_holiday + snow, data=trips_train_data)
+
+save(model4, file="model.Rdata")
+
+```
+
+```{r}
+
+#testing with test data
+
+load("model.Rdata")
+
+rmse_t <- sqrt(mean((predict(model4, trips_test_data) - trips_test_data$num_trips)^2))
+rsq_t <- rsquare(model4, trips_test_data)
+
+rmse_t
+rsq_t
+
+trips_test_data %>%add_predictions(model4) %>%
+  ggplot() + 
+  geom_point(aes(x= pred, y = num_trips), color = "red") +
+  scale_y_continuous(label = comma) +
+  scale_x_continuous(label = comma) + 
+  labs(x = "Predicted Number of Trips", y = "Actual Number of Trips")
+
+
+```
+=> With the validation set, the RMSE was 3704.303 and R-Squared was 0.88.
+With the testing set, the RMSE is 3881.972 and R-squared is 0.86.
+The model fits the testing set significantly and is expected to fit pretty well in other datasets as well.
+
+
